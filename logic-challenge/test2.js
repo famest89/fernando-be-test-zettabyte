@@ -8,7 +8,9 @@
 const data = [1, 4, 2, 3, 5, 3, 2, 4];
 
 function result(data) {
-  // Your Code Here
+  const newArr = data.filter((item, index) => data.indexOf(item) === index)
+
+  return newArr.sort();
 }
 
 console.log(result(data));
