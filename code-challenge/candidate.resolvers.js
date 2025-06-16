@@ -1,35 +1,4 @@
-async function UpdateCandidate(
-  parent,
-  {
-    _id,
-    candidate_input,
-    lang,
-    new_desired_program,
-    is_from_admission_form,
-    is_prevent_resend_notif,
-    is_save_identity_student,
-    is_minor_student,
-  },
-  context,
-) {
-  let tokenUser = String(context.req.headers.authorization).replace(
-    'Bearer ',
-    '',
-  );
-  tokenUser = tokenUser.replace(/"/g, '');
-
-  let userId;
-
-  if (tokenUser && tokenUser !== 'undefined') {
-    userId = common.getUserId(tokenUser);
-  }
-
-  // *************** find candidate first before update
-  const candidateBeforeUpdate = await CandidateModel.findById(_id)
-    .select('iban payment_supports parents')
-    .lean();
-
-  //? REFACTOR START: Serialize input
+function serializeInput(candidate_input) {
   if (candidate_input.school) {
     candidate_input.school = String(candidate_input.school).toUpperCase();
   }
@@ -44,10 +13,9 @@ async function UpdateCandidate(
       candidate_input.sex = candidate_input.civility === 'MR' ? 'M' : 'F';
     }
   }
-  //? REFACTOR END: Serialize input
+}
 
-  //? REFACTOR START: Validate Iban
-  //? REFACTOR START: Validate Iban for Parents
+async function validateIbanForParents(candidate_input) {
   if (candidate_input.parents && candidate_input.parents.length) {
     for (let parent of candidate_input.parents) {
       if (parent.iban && parent.bic && parent.account_holder_name) {
@@ -80,13 +48,9 @@ async function UpdateCandidate(
       }
     }
   }
-  //? REFACTOR END: Validate Iban for Parents
+}
 
-  if (candidate_input.tag_ids === null) {
-    candidate_input.tag_ids = [];
-  }
-
-  //? REFACTOR START: Validate Iban for Candidate
+async function validateIbanForCandidates(candidate_input) {
   // validate iban & bic candidate
   if (
     candidate_input.iban &&
@@ -166,10 +130,9 @@ async function UpdateCandidate(
       }
     }
   }
-  //? REFACTOR END: Validate Iban for Candidate
-  //? REFACTOR END: Validate Iban
+}
 
-  //? REFACTOR START: Check if Candidate exist
+async function checkIfCandidateExist(candidateBeforeUpdate, candidate_input) {
   // *************** if data candidate before update is exist
   if (candidateBeforeUpdate) {
     // *************** if iban in student is different from input
@@ -254,12 +217,9 @@ async function UpdateCandidate(
       }
     }
   }
-  //? REFACTOR END: Check if Candidate exist
+}
 
-  const nowTime = moment.utc();
-  const oldCandidate = await CandidateModel.findById(_id);
-
-  //? REFACTOR START: Check Legality and Civility
+async function checkLegalityAndCivility(candidate_input, oldCandidate) {
   // ******************* check if unique_id is exist in legal representative, if exist, then use old representative, otherwise create new using UUID
   if (
     candidate_input.legal_representative &&
@@ -327,42 +287,6 @@ async function UpdateCandidate(
       delete term._id;
       return term;
     });
-  //? REFACTOR END: Check Legality and Civility
-
-  //? REFACTOR START: Check Email and Notification
-  // ************** add condition if candidate old email is different from input and candidate is registered
-  if (
-    oldCandidate &&
-    oldCandidate.user_id &&
-    oldCandidate.candidate_admission_status &&
-    oldCandidate.candidate_admission_status === 'registered' &&
-    candidate_input &&
-    ((oldCandidate.email &&
-      candidate_input.email &&
-      oldCandidate.email !== candidate_input.email) ||
-      (!oldCandidate.email && candidate_input.email))
-  ) {
-    // ************** if different, then remove the recovery code in user
-    await UserModel.updateOne(
-      { _id: oldCandidate.user_id },
-      {
-        $set: {
-          email: candidate_input.email,
-          recovery_code: '',
-        },
-      },
-      { new: true },
-    );
-    // ************** update candidate email so the notificatio can get user id based on new email instead of old email
-    await CandidateModel.updateOne(
-      { _id: oldCandidate._id },
-      { $set: { email: candidate_input.email } },
-    );
-
-    // ************** send notif stud reg n1 for set the recovery code again
-    await CandidateUtility.Send_STUD_REG_N1(oldCandidate._id, lang);
-  }
-  //? REFACTOR END: Check Email and Notification
 
   if (
     candidate_input &&
@@ -420,8 +344,44 @@ async function UpdateCandidate(
       }
     }
   }
+}
 
-  //? REFACTOR START: Update Candidate and Readmission Validation
+async function checkEmailAndNotification(oldCandidate, candidate_input) {
+  // ************** add condition if candidate old email is different from input and candidate is registered
+  if (
+    oldCandidate &&
+    oldCandidate.user_id &&
+    oldCandidate.candidate_admission_status &&
+    oldCandidate.candidate_admission_status === 'registered' &&
+    candidate_input &&
+    ((oldCandidate.email &&
+      candidate_input.email &&
+      oldCandidate.email !== candidate_input.email) ||
+      (!oldCandidate.email && candidate_input.email))
+  ) {
+    // ************** if different, then remove the recovery code in user
+    await UserModel.updateOne(
+      { _id: oldCandidate.user_id },
+      {
+        $set: {
+          email: candidate_input.email,
+          recovery_code: '',
+        },
+      },
+      { new: true },
+    );
+    // ************** update candidate email so the notificatio can get user id based on new email instead of old email
+    await CandidateModel.updateOne(
+      { _id: oldCandidate._id },
+      { $set: { email: candidate_input.email } },
+    );
+
+    // ************** send notif stud reg n1 for set the recovery code again
+    await CandidateUtility.Send_STUD_REG_N1(oldCandidate._id, lang);
+  }
+}
+
+async function updateReadmissionValidation(candidate_input, oldCandidate) {
   // To update candidate status, and validation on readmission assignment table
   if (
     (candidate_input.candidate_admission_status &&
@@ -530,9 +490,161 @@ async function UpdateCandidate(
       },
     );
   }
-  //? REFACTOR END: Update Candidate and Readmission Validation
+}
 
-  //? REFACTOR START: Change Status for Continuous formation student
+async function acceptDownPaymentMode(
+  continuousTypeOfFormation,
+  oldCandidate,
+  typeOfFormation,
+  candidate_input,
+) {
+  // process to accept step down_payment_mode
+  // Accept step down_payment_mode if FE send payment 'no_down_payment'
+  if (
+    (typeOfFormation &&
+      (continuousTypeOfFormation.includes(typeOfFormation.type_of_formation) ||
+        oldCandidate.readmission_status === 'readmission_table') &&
+      candidate_input.payment_method &&
+      candidate_input.payment_method !== oldCandidate.payment_method &&
+      !['credit_card', 'sepa', 'transfer', 'check', 'bank'].includes(
+        candidate_input.payment_method,
+      )) ||
+    candidate_input.payment === 'no_down_payment'
+  ) {
+    if (
+      admissionProcess &&
+      admissionProcess.steps &&
+      admissionProcess.steps.length
+    ) {
+      const downPaymentStep = admissionProcess.steps.find(
+        (step) => step.step_type === 'down_payment_mode',
+      );
+      if (downPaymentStep) {
+        // await StudentAdmissionProcessStepModel.findByIdAndUpdate(downPaymentStep._id, { $set: { step_status: 'accept' } });
+        await FormProcessStepModel.findByIdAndUpdate(downPaymentStep._id, {
+          $set: { step_status: 'accept' },
+        });
+        await CandidateUtility.updateCandidateAdmissionStatusFromAdmissionProcessStep(
+          _id,
+          downPaymentStep._id,
+          context.userId,
+          lang,
+        );
+        // ******************* process candidate to register if its type FI
+        if (typeOfFormation.type_of_formation === 'classic') {
+          await CandidateUtility.proceedRegisteredStudent(_id, lang);
+        }
+      }
+    }
+  }
+}
+
+async function acceptCampusValidation(
+  typeOfFormation,
+  continuousTypeOfFormation,
+  oldCandidate,
+  candidate_input,
+) {
+  // process to accept step campus_validation
+  if (
+    typeOfFormation &&
+    (continuousTypeOfFormation.includes(typeOfFormation.type_of_formation) ||
+      oldCandidate.readmission_status === 'readmission_table') &&
+    candidate_input.program_confirmed &&
+    candidate_input.program_confirmed === 'done'
+  ) {
+    if (
+      admissionProcess &&
+      admissionProcess.steps &&
+      admissionProcess.steps.length
+    ) {
+      const campusStep = admissionProcess.steps.find(
+        (step) => step.step_type === 'campus_validation',
+      );
+      if (campusStep) {
+        // await StudentAdmissionProcessStepModel.findByIdAndUpdate(campusStep._id, { $set: { step_status: 'accept' } });
+        await FormProcessStepModel.findByIdAndUpdate(campusStep._id, {
+          $set: { step_status: 'accept' },
+        });
+        await CandidateUtility.updateCandidateAdmissionStatusFromAdmissionProcessStep(
+          _id,
+          campusStep._id,
+          context.userId,
+          lang,
+        );
+      }
+    }
+  }
+}
+
+async function acceptSchoolContract(
+  typeOfFormation,
+  continuousTypeOfFormation,
+  oldCandidate,
+  candidate_input,
+) {
+  // process to accept step school contract
+  if (
+    typeOfFormation &&
+    (continuousTypeOfFormation.includes(typeOfFormation.type_of_formation) ||
+      oldCandidate.readmission_status === 'readmission_table') &&
+    candidate_input.signature &&
+    candidate_input.signature === 'done'
+  ) {
+    if (
+      admissionProcess &&
+      admissionProcess.steps &&
+      admissionProcess.steps.length
+    ) {
+      const summaryStep = admissionProcess.steps.find(
+        (step) => step.step_type === 'summary',
+      );
+      if (summaryStep) {
+        // await StudentAdmissionProcessStepModel.findByIdAndUpdate(summaryStep._id, { $set: { step_status: 'accept' } }, { new: true });
+        await FormProcessStepModel.findByIdAndUpdate(
+          summaryStep._id,
+          { $set: { step_status: 'accept' } },
+          { new: true },
+        );
+        await CandidateUtility.updateCandidateAdmissionStatusFromAdmissionProcessStep(
+          _id,
+          summaryStep._id,
+          context.userId,
+          lang,
+        );
+        await FormProcessModel.findByIdAndUpdate(
+          oldCandidate.admission_process_id,
+          {
+            $set: {
+              signature_date: {
+                date: nowTime.format('DD/MM/YYYY'),
+                time: nowTime.format('HH:mm'),
+              },
+            },
+          },
+        );
+
+        candidate_input.candidate_sign_date = {
+          date: nowTime.format('DD/MM/YYYY'),
+          time: nowTime.format('HH:mm'),
+        };
+        // Update Candidate summaryStep
+        const summarySchoolPdf =
+          await StudentAdmissionProcessUtility.generatePDFStep(
+            _id,
+            summaryStep._id,
+            lang,
+          );
+        candidate_input.school_contract_pdf_link = summarySchoolPdf;
+      }
+    }
+  }
+}
+
+async function changeContinuousFormationStudentStatus(
+  oldCandidate,
+  candidate_input,
+) {
   // start process change step status for continuous fomation student
   const typeOfFormation = await TypeOfFormationModel.findById(
     oldCandidate.type_of_formation_id,
@@ -594,144 +706,37 @@ async function UpdateCandidate(
       }
     }
   }
-  //? REFACTOR END: Change Status for Continuous formation student
 
-  //? REFACTOR START: Accept step down payment mode
-  // process to accept step down_payment_mode
-  // Accept step down_payment_mode if FE send payment 'no_down_payment'
-  if (
-    (typeOfFormation &&
-      (continuousTypeOfFormation.includes(typeOfFormation.type_of_formation) ||
-        oldCandidate.readmission_status === 'readmission_table') &&
-      candidate_input.payment_method &&
-      candidate_input.payment_method !== oldCandidate.payment_method &&
-      !['credit_card', 'sepa', 'transfer', 'check', 'bank'].includes(
-        candidate_input.payment_method,
-      )) ||
-    candidate_input.payment === 'no_down_payment'
-  ) {
-    if (
-      admissionProcess &&
-      admissionProcess.steps &&
-      admissionProcess.steps.length
-    ) {
-      const downPaymentStep = admissionProcess.steps.find(
-        (step) => step.step_type === 'down_payment_mode',
-      );
-      if (downPaymentStep) {
-        // await StudentAdmissionProcessStepModel.findByIdAndUpdate(downPaymentStep._id, { $set: { step_status: 'accept' } });
-        await FormProcessStepModel.findByIdAndUpdate(downPaymentStep._id, {
-          $set: { step_status: 'accept' },
-        });
-        await CandidateUtility.updateCandidateAdmissionStatusFromAdmissionProcessStep(
-          _id,
-          downPaymentStep._id,
-          context.userId,
-          lang,
-        );
-        // ******************* process candidate to register if its type FI
-        if (typeOfFormation.type_of_formation === 'classic') {
-          await CandidateUtility.proceedRegisteredStudent(_id, lang);
-        }
-      }
-    }
-  }
-  //? REFACTOR END: Accept step down payment mode
+  acceptDownPaymentMode(
+    continuousTypeOfFormation,
+    oldCandidate,
+    typeOfFormation,
+    candidate_input,
+  );
 
   //? REFACTOR START: Accept step campus validation
-  // process to accept step campus_validation
-  if (
-    typeOfFormation &&
-    (continuousTypeOfFormation.includes(typeOfFormation.type_of_formation) ||
-      oldCandidate.readmission_status === 'readmission_table') &&
-    candidate_input.program_confirmed &&
-    candidate_input.program_confirmed === 'done'
-  ) {
-    if (
-      admissionProcess &&
-      admissionProcess.steps &&
-      admissionProcess.steps.length
-    ) {
-      const campusStep = admissionProcess.steps.find(
-        (step) => step.step_type === 'campus_validation',
-      );
-      if (campusStep) {
-        // await StudentAdmissionProcessStepModel.findByIdAndUpdate(campusStep._id, { $set: { step_status: 'accept' } });
-        await FormProcessStepModel.findByIdAndUpdate(campusStep._id, {
-          $set: { step_status: 'accept' },
-        });
-        await CandidateUtility.updateCandidateAdmissionStatusFromAdmissionProcessStep(
-          _id,
-          campusStep._id,
-          context.userId,
-          lang,
-        );
-      }
-    }
-  }
+  acceptCampusValidation(
+    typeOfFormation,
+    continuousTypeOfFormation,
+    oldCandidate,
+    candidate_input,
+  );
   //? REFACTOR END: Accept step campus validation
 
   //? REFACTOR START: Accept step school contract
-  // process to accept step school contract
-  if (
-    typeOfFormation &&
-    (continuousTypeOfFormation.includes(typeOfFormation.type_of_formation) ||
-      oldCandidate.readmission_status === 'readmission_table') &&
-    candidate_input.signature &&
-    candidate_input.signature === 'done'
-  ) {
-    if (
-      admissionProcess &&
-      admissionProcess.steps &&
-      admissionProcess.steps.length
-    ) {
-      const summaryStep = admissionProcess.steps.find(
-        (step) => step.step_type === 'summary',
-      );
-      if (summaryStep) {
-        // await StudentAdmissionProcessStepModel.findByIdAndUpdate(summaryStep._id, { $set: { step_status: 'accept' } }, { new: true });
-        await FormProcessStepModel.findByIdAndUpdate(
-          summaryStep._id,
-          { $set: { step_status: 'accept' } },
-          { new: true },
-        );
-        await CandidateUtility.updateCandidateAdmissionStatusFromAdmissionProcessStep(
-          _id,
-          summaryStep._id,
-          context.userId,
-          lang,
-        );
-        await FormProcessModel.findByIdAndUpdate(
-          oldCandidate.admission_process_id,
-          {
-            $set: {
-              signature_date: {
-                date: nowTime.format('DD/MM/YYYY'),
-                time: nowTime.format('HH:mm'),
-              },
-            },
-          },
-        );
+  acceptSchoolContract(
+    typeOfFormation,
+    continuousTypeOfFormation,
+    oldCandidate,
+    candidate_input,
+  );
+  //? REFACTOR END: Accept step school contract
+}
 
-        candidate_input.candidate_sign_date = {
-          date: nowTime.format('DD/MM/YYYY'),
-          time: nowTime.format('HH:mm'),
-        };
-        // Update Candidate summaryStep
-        const summarySchoolPdf =
-          await StudentAdmissionProcessUtility.generatePDFStep(
-            _id,
-            summaryStep._id,
-            lang,
-          );
-        candidate_input.school_contract_pdf_link = summarySchoolPdf;
-      }
-    }
-  }
-  //? REFACTOR END: Accept step campus validation
-
-  //? REFACTOR START: Payment method validation
-  //? REFACTOR START: Payment method validation for Candidate
+async function paymentMethodValidationForCandidates(
+  candidate_input,
+  oldCandidate,
+) {
   if (
     candidate_input.payment_method &&
     ['check', 'transfer'].includes(candidate_input.payment_method) &&
@@ -781,8 +786,9 @@ async function UpdateCandidate(
       }
     }
   }
+}
 
-  //? REFACTOR START: Payment method validation for Parents
+async function paymentMethodValidationForParents(candidate_input) {
   // *************** failsafe, empty parent if required data is null
   if (candidate_input.parents && candidate_input.parents.length) {
     const validParentsData = [];
@@ -817,17 +823,19 @@ async function UpdateCandidate(
     }
     candidate_input.payment_supports = validatedPaymentSupportsData;
   }
+}
+
+async function paymentMethodValidation(candidate_input, oldCandidate) {
+  //? REFACTOR START: Payment method validation for Candidate
+  paymentMethodValidationForCandidates(candidate_input, oldCandidate);
+  //? REFACTOR END: Payment method validation for Candidate
+
+  //? REFACTOR START: Payment method validation for Parents
+  paymentMethodValidationForParents(candidate_input);
   //? REFACTOR END: Payment method validation for Parents
-  //? REFACTOR END: Payment method validation
+}
 
-  // ******************* Save history legal representative
-  await CandidateUtility.SaveHistoryLegalRepresentative(
-    candidate_input,
-    _id,
-    userId,
-  );
-
-  //? REFACTOR START: CVEC number validation
+async function cvecNumberValidation(candidate_input, oldCandidate) {
   //*********** When cvec_number or ine_number is updated from student card also update it to the cvec form to the cvec_number field and ine_number field of the question and field step
   if (candidate_input.cvec_number || candidate_input.ine_number) {
     if (candidate_input.cvec_number) {
@@ -958,15 +966,43 @@ async function UpdateCandidate(
       }
     }
   }
-  //? REFACTOR END: CVEC number validation
+}
 
-  const updatedCandidate = await CandidateModel.findByIdAndUpdate(
-    _id,
-    { $set: candidate_input },
-    { new: true },
-  );
+async function createScholarshipBilling(updatedCandidate) {
+  // Generate Billing if scholarship fee is accepted
+  // const admissionProcessUpdated = await StudentAdmissionProcessModel.findById(updatedCandidate.admission_process_id)
+  const admissionProcessUpdated = await FormProcessModel.findById(
+    updatedCandidate.admission_process_id,
+  )
+    .populate({ path: 'steps' })
+    .lean();
+  if (
+    admissionProcessUpdated &&
+    admissionProcessUpdated.steps &&
+    admissionProcessUpdated.steps.length
+  ) {
+    const scholarshipStep = admissionProcessUpdated.steps.find(
+      (step) => step.step_type === 'scholarship_fee',
+    );
+    if (
+      typeOfFormation &&
+      (continuousTypeOfFormation.includes(typeOfFormation.type_of_formation) ||
+        oldCandidate.readmission_status === 'readmission_table') &&
+      scholarshipStep &&
+      scholarshipStep.step_status === 'accept' &&
+      oldScholarshipStep &&
+      oldScholarshipStep.step_status !== 'accept'
+    ) {
+      await CandidateUtility.updateCandidateBilling(
+        oldCandidate,
+        updatedCandidate,
+        context.userId,
+      );
+    }
+  }
+}
 
-  //? REFACTOR START: Scholarship Fee
+async function scholarshipFee(oldCandidate, candidate_input) {
   // process to accept step scholarship fee
   let oldSelectedPaymentPlan = oldCandidate.selected_payment_plan;
   oldSelectedPaymentPlan.payment_date = oldSelectedPaymentPlan.payment_date.map(
@@ -1047,41 +1083,11 @@ async function UpdateCandidate(
   }
 
   //? REFACTOR START: Create Scholarship billing
-  // Generate Billing if scholarship fee is accepted
-  // const admissionProcessUpdated = await StudentAdmissionProcessModel.findById(updatedCandidate.admission_process_id)
-  const admissionProcessUpdated = await FormProcessModel.findById(
-    updatedCandidate.admission_process_id,
-  )
-    .populate({ path: 'steps' })
-    .lean();
-  if (
-    admissionProcessUpdated &&
-    admissionProcessUpdated.steps &&
-    admissionProcessUpdated.steps.length
-  ) {
-    const scholarshipStep = admissionProcessUpdated.steps.find(
-      (step) => step.step_type === 'scholarship_fee',
-    );
-    if (
-      typeOfFormation &&
-      (continuousTypeOfFormation.includes(typeOfFormation.type_of_formation) ||
-        oldCandidate.readmission_status === 'readmission_table') &&
-      scholarshipStep &&
-      scholarshipStep.step_status === 'accept' &&
-      oldScholarshipStep &&
-      oldScholarshipStep.step_status !== 'accept'
-    ) {
-      await CandidateUtility.updateCandidateBilling(
-        oldCandidate,
-        updatedCandidate,
-        context.userId,
-      );
-    }
-  }
+  createScholarshipBilling(updatedCandidate);
   //? REFACTOR END: Create Scholarship billing
-  //? REFACTOR END: Scholarship Fee
+}
 
-  //? REFACTOR START: Update Candidate User Data
+async function updateCandidateUserData(candidate_input, oldCandidate) {
   // update user data
   let userCandidate = await UserModel.findById(updatedCandidate.user_id);
   if (userCandidate) {
@@ -1690,9 +1696,9 @@ async function UpdateCandidate(
     });
     await CandidateUtility.send_StudentCard_N1(updatedCandidate, lang);
   }
-  //? REFACTOR END: Update Candidate User Data
+}
 
-  //? REFACTOR START: Update Old Candidate User Data
+async function updateOldCandidateUserData(oldCandidate) {
   // Generate date for field bill_validated_at if candidate_admission_status change to bill_validated
 
   if (
@@ -1802,9 +1808,9 @@ async function UpdateCandidate(
   if (bulkUpdateCandidateQuery.length > 0) {
     await CandidateModel.bulkWrite(bulkUpdateCandidateQuery);
   }
-  //? REFACTOR END: Update Old Candidate User Data
+}
 
-  //? REFACTOR START: Update Student Admission Process
+async function updateStudentAdmissionProcess(candidate_input, oldCandidate) {
   await StudentAdmissionProcessUtility.updateStudentAdmissionProcessBasedOnStudentData(
     _id,
   );
@@ -1903,9 +1909,9 @@ async function UpdateCandidate(
   ) {
     delete candidate_input.candidate_admission_status;
   }
-  //? REFACTOR END: Update Student Admission Process
+}
 
-  //? REFACTOR START: Update Payment Support
+async function updatePaymentSupport(candidate_input, oldCandidate) {
   //** remove field payment_supports._id if the value is null */
   if (
     candidate_input.payment_supports &&
@@ -2067,27 +2073,9 @@ async function UpdateCandidate(
   if (updatedCandidateNew && updatedCandidateNew.payment_supports.length) {
     await BillingUtility.updateFinancialSupportBilling(updatedCandidateNew);
   }
-  //? REFACTOR END: Update Payment Support
+}
 
-  // ******** call function GenerateStudentBalance if candidate registered
-  if (
-    candidate_input.candidate_admission_status &&
-    oldCandidate.candidate_admission_status !== 'registered' &&
-    updatedCandidateNew.candidate_admission_status === 'registered'
-  ) {
-    // ******** add form process to param,if there's any
-    if (updatedCandidateNew.admission_process_id) {
-      await MasterTransactionUtilities.GenerateStudentBalance(
-        _id,
-        updatedCandidateNew.admission_process_id,
-        true,
-      );
-    } else {
-      await MasterTransactionUtilities.GenerateStudentBalance(_id);
-    }
-  }
-  
-  //? REFACTOR START: Update Candidate Admission Status
+async function updateCandidateAdmissionStatus(candidate_input, oldCandidate) {
   if (
     (candidate_input.candidate_admission_status &&
       oldCandidate.candidate_admission_status !== 'registered' &&
@@ -2145,6 +2133,141 @@ async function UpdateCandidate(
       },
     });
   }
+}
+
+async function UpdateCandidate(
+  parent,
+  {
+    _id,
+    candidate_input,
+    lang,
+    new_desired_program,
+    is_from_admission_form,
+    is_prevent_resend_notif,
+    is_save_identity_student,
+    is_minor_student,
+  },
+  context,
+) {
+  let tokenUser = String(context.req.headers.authorization).replace(
+    'Bearer ',
+    '',
+  );
+  tokenUser = tokenUser.replace(/"/g, '');
+
+  let userId;
+
+  if (tokenUser && tokenUser !== 'undefined') {
+    userId = common.getUserId(tokenUser);
+  }
+
+  // *************** find candidate first before update
+  const candidateBeforeUpdate = await CandidateModel.findById(_id)
+    .select('iban payment_supports parents')
+    .lean();
+
+  //? REFACTOR START: Serialize input
+  serializeInput(candidate_input);
+  //? REFACTOR END: Serialize input
+
+  //? REFACTOR START: Validate Iban
+  //? REFACTOR START: Validate Iban for Parents
+  validateIbanForParents(candidate_input);
+  //? REFACTOR END: Validate Iban for Parents
+
+  if (candidate_input.tag_ids === null) {
+    candidate_input.tag_ids = [];
+  }
+
+  //? REFACTOR START: Validate Iban for Candidates
+  validateIbanForCandidates(candidate_input);
+  //? REFACTOR END: Validate Iban for Candidates
+  //? REFACTOR END: Validate Iban
+
+  //? REFACTOR START: Check if Candidate exist
+  checkIfCandidateExist(candidateBeforeUpdate, candidate_input);
+  //? REFACTOR END: Check if Candidate exist
+
+  const nowTime = moment.utc();
+  const oldCandidate = await CandidateModel.findById(_id);
+
+  //? REFACTOR START: Check Legality and Civility
+  checkLegalityAndCivility(candidate_input, oldCandidate);
+  //? REFACTOR END: Check Legality and Civility
+
+  //? REFACTOR START: Check Email and Notification
+  checkEmailAndNotification(oldCandidate, candidate_input);
+  //? REFACTOR END: Check Email and Notification
+
+  //? REFACTOR START: Update Readmission Validation
+  updateReadmissionValidation(candidate_input, oldCandidate);
+  //? REFACTOR END: Update Readmission Validation
+
+  //? REFACTOR START: Change Status for Continuous formation student
+  changeContinuousFormationStudentStatus(oldCandidate, candidate_input);
+  //? REFACTOR END: Change Status for Continuous formation student
+
+  //? REFACTOR START: Payment method validation
+  paymentMethodValidation(candidate_input, oldCandidate);
+  //? REFACTOR END: Payment method validation
+
+  // ******************* Save history legal representative
+  await CandidateUtility.SaveHistoryLegalRepresentative(
+    candidate_input,
+    _id,
+    userId,
+  );
+
+  //? REFACTOR START: CVEC number validation
+  cvecNumberValidation(candidate_input, oldCandidate);
+  //? REFACTOR END: CVEC number validation
+
+  const updatedCandidate = await CandidateModel.findByIdAndUpdate(
+    _id,
+    { $set: candidate_input },
+    { new: true },
+  );
+
+  //? REFACTOR START: Scholarship Fee
+  scholarshipFee(oldCandidate, candidate_input);
+  //? REFACTOR END: Scholarship Fee
+
+  //? REFACTOR START: Update Candidate User Data
+  updateCandidateUserData(candidate_input, oldCandidate);
+  //? REFACTOR END: Update Candidate User Data
+
+  //? REFACTOR START: Update Old Candidate User Data
+  updateOldCandidateUserData(oldCandidate);
+  //? REFACTOR END: Update Old Candidate User Data
+
+  //? REFACTOR START: Update Student Admission Process
+  updateStudentAdmissionProcess(candidate_input, oldCandidate);
+  //? REFACTOR END: Update Student Admission Process
+
+  //? REFACTOR START: Update Payment Support
+  updatePaymentSupport(candidate_input, oldCandidate);
+  //? REFACTOR END: Update Payment Support
+
+  // ******** call function GenerateStudentBalance if candidate registered
+  if (
+    candidate_input.candidate_admission_status &&
+    oldCandidate.candidate_admission_status !== 'registered' &&
+    updatedCandidateNew.candidate_admission_status === 'registered'
+  ) {
+    // ******** add form process to param,if there's any
+    if (updatedCandidateNew.admission_process_id) {
+      await MasterTransactionUtilities.GenerateStudentBalance(
+        _id,
+        updatedCandidateNew.admission_process_id,
+        true,
+      );
+    } else {
+      await MasterTransactionUtilities.GenerateStudentBalance(_id);
+    }
+  }
+
+  //? REFACTOR START: Update Candidate Admission Status
+  updateCandidateAdmissionStatus(candidate_input, oldCandidate);
   //? REFACTOR END: Update Candidate Admission Status
 
   // ******************* check if is_minor_student is true
